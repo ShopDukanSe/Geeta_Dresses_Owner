@@ -133,6 +133,18 @@ async function apiPostSafe(action, payload, failMsg){
   try{ return await apiPost(action, payload); }
   catch(err){ console.warn("Geeta Dresses owner: "+action+" API failed — change kept locally only.", err); if(failMsg) toast(failMsg); return null; }
 }
+/* A base64 image (banner photo) is far too big for a URL query string (the GET approach above
+   silently fails or gets truncated past a few KB) — this sends it as a real POST body instead.
+   mode:"no-cors" + text/plain avoids both the CORS-preflight problem AND the CORS-response
+   problem noted above: the request reaches Code.gs and executes fine, we just can't read its
+   reply, so this is fire-and-forget (no error is ever thrown — treat the call as "sent"). */
+function apiPostBig(action, payload){
+  if(!apiConfigured()) return;
+  return fetch(API_URL, {
+    method:"POST", mode:"no-cors", headers:{"Content-Type":"text/plain;charset=utf-8"},
+    body: JSON.stringify(Object.assign({action}, payload))
+  }).catch(err=>console.warn("Geeta Dresses owner: "+action+" (big) API failed — change kept locally only.", err));
+}
 
 /* Resizes/compresses an uploaded image to a small JPEG data URL — keeps it well under Google
    Sheets' ~50,000-char-per-cell limit once base64-encoded (a full-res phone photo blows past
@@ -667,7 +679,7 @@ function renderRulesTab(body){
         const n=inp.dataset.banner, f=e.target.files[0]; if(!f) return;
         const dataUrl = await resizeImageFile_(f, 1200, 0.7);
         S.config["banner_"+n]=dataUrl; save(); renderBannerSlots();
-        await apiPostSafe("updateConfig", {["banner_"+n]:dataUrl});
+        apiPostBig("updateConfig", {["banner_"+n]:dataUrl});
         toast("Banner "+n+" saved"+(apiConfigured()?"":" (local demo — connect the backend to go live)"));
       };
     });
