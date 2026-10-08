@@ -543,9 +543,18 @@ function renderProductForm(){
   // each one is uploaded to Drive separately (see apiPostBig below) rather than stuffed into the
   // main product save, which travels as a small GET request and can't carry a base64 image.
   const pendingPhotos = {};
+  const pendingReplace = {}; // slot index -> true if this slot already had a saved photo we're replacing
   wrap.querySelectorAll("[data-photo]").forEach(inp=>{
     inp.onchange=async e=>{
       const i=Number(inp.dataset.photo), f=e.target.files[0]; if(!f) return;
+      // If this slot already has a photo saved on the server (not just a pending pick), confirm
+      // before replacing it — a confirmed replace also deletes the OLD photo from Drive so they
+      // don't pile up there forever.
+      if(photos[i]){
+        const ok=confirm(`Slot ${i+1} already has a photo. Replace it? (The old photo will be deleted from Drive.)`);
+        if(!ok){ inp.value=""; return; }
+        pendingReplace[i]=true;
+      }
       try{
         const dataUrl = await resizeImageFile_(f, 1600, 0.75);
         pendingPhotos[i]=dataUrl;
@@ -599,7 +608,7 @@ function renderProductForm(){
     await Promise.all(sizes.map(s=>apiPostSafe("updateStock", {product_id:id, size:s, qty:stockQty[s]})));
     const pendingSlots=Object.keys(pendingPhotos);
     if(pendingSlots.length){
-      pendingSlots.forEach(i=>apiPostBig("uploadProductPhoto", {product_id:id, slot:Number(i)+1, data_url:pendingPhotos[i]}));
+      pendingSlots.forEach(i=>apiPostBig("uploadProductPhoto", {product_id:id, slot:Number(i)+1, data_url:pendingPhotos[i], replace:!!pendingReplace[i]}));
       toast(`Uploading ${pendingSlots.length>1?"photos":"photo"} to Drive — reopen ${id} in about 10 seconds to confirm`);
     }
   };
