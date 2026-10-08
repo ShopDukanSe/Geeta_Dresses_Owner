@@ -133,6 +133,15 @@ async function apiPostSafe(action, payload, failMsg){
   try{ return await apiPost(action, payload); }
   catch(err){ console.warn("Geeta Dresses owner: "+action+" API failed — change kept locally only.", err); if(failMsg) toast(failMsg); return null; }
 }
+/* Every save in this app used to toast "saved" the instant you changed something locally,
+   before the network call even finished — so it said "saved" whether or not it actually
+   reached the sheet. This waits for the real result and only then shows ONE honest toast. */
+async function apiPostConfirmed(action, payload, okMsg, failMsg){
+  if(!apiConfigured()){ toast(okMsg+" (local demo — connect the backend to go live)"); return true; }
+  const res = await apiPostSafe(action, payload);
+  toast(res ? okMsg : (failMsg || "Couldn't reach the backend — kept locally only, try again"));
+  return !!res;
+}
 /* A base64 image (banner photo) is far too big for a URL query string (the GET approach above
    silently fails or gets truncated past a few KB) — this sends it as a real POST body instead.
    mode:"no-cors" + text/plain avoids both the CORS-preflight problem AND the CORS-response
@@ -423,8 +432,7 @@ function renderPoliciesTab(body){
   $("#savePolicies").onclick=async ()=>{
     document.querySelectorAll("#policyFields [data-pkey]").forEach(ta=>{ S.policies[ta.dataset.pkey]=ta.value; });
     save();
-    await apiPostSafe("updatePolicies", S.policies, "Saved locally — couldn't reach the backend to save on the sheet.");
-    toast("Policy text saved");
+    await apiPostConfirmed("updatePolicies", S.policies, "Policy text saved", "Policy text couldn't be saved to the sheet — try again");
   };
 }
 /* ================= Inventory tab: stock editing + product add/edit/delete (CRUD) ================= */
@@ -454,8 +462,8 @@ function renderInventoryTab(body){
       const qty=Math.max(0,parseInt(inp.value)||0);
       S.stock[id]=S.stock[id]||{};
       S.stock[id][inp.dataset.size]=qty;
-      save(); toast(`${id} (${inp.dataset.size}) stock updated`);
-      await apiPostSafe("updateStock", {product_id:id, size:inp.dataset.size, qty});
+      save();
+      await apiPostConfirmed("updateStock", {product_id:id, size:inp.dataset.size, qty}, `${id} (${inp.dataset.size}) stock updated`, `${id} (${inp.dataset.size}) stock couldn't be saved to the sheet — try again`);
     };
   });
   $("#addProductBtn").onclick=()=>{ invFormState="new"; renderProductForm(); };
@@ -469,9 +477,9 @@ function renderInventoryTab(body){
       if(tr.dataset.confirming){
         PRODUCTS = PRODUCTS.filter(p=>p.id!==id);
         delete S.stock[id];
-        save(); toast(`${id} deleted`);
-        await apiPostSafe("deleteProduct", {product_id:id});
+        save();
         renderOwner();
+        await apiPostConfirmed("deleteProduct", {product_id:id}, `${id} deleted`, `${id} removed here, but couldn't be deleted from the sheet — try again`);
       } else {
         tr.dataset.confirming="1"; btn.textContent="Confirm delete?";
         setTimeout(()=>{ if(tr.isConnected){ delete tr.dataset.confirming; btn.textContent="Delete"; } }, 4000);
@@ -541,9 +549,8 @@ function renderProductForm(){
     if(!S.stock[id]) S.stock[id] = {}; sizes.forEach(s=>{ if(S.stock[id][s]==null) S.stock[id][s]=0; });
     save();
     invFormState=null;
-    toast(editing?`${id} updated`:`${id} added`);
     renderOwner();
-    await apiPostSafe("updateProduct", {product:productObj}, "Saved locally — couldn't reach the backend to save on the sheet.");
+    await apiPostConfirmed("updateProduct", {product:productObj}, editing?`${id} updated`:`${id} added`, `${id} saved here, but couldn't reach the sheet — try again`);
   };
 }
 
@@ -564,9 +571,12 @@ function wireOwnerOrderActions(){
         tr.lastElementChild.innerHTML=`<div class="dispatch-box">OTP will be emailed to customer on confirm.<button class="small-btn" data-act="confirmDispatch">Confirm dispatch</button></div>`;
       }
       if(act==="confirmDispatch"){
-        o.otp=String(Math.floor(1000+Math.random()*9000)); toast(`OTP ${o.otp} emailed to ${o.email}`);
-        o.stage="Dispatched"; o.dispatchedAt=new Date().toISOString(); save(); toast("Marked dispatched"); renderOwner();
-        apiPostSafe("updateOrderStatus", {order_id:o.id, status:"Dispatched", otp:o.otp});
+        o.otp=String(Math.floor(1000+Math.random()*9000));
+        o.stage="Dispatched"; o.dispatchedAt=new Date().toISOString(); save(); renderOwner();
+        (async()=>{
+          const ok = await apiPostConfirmed("updateOrderStatus", {order_id:o.id, status:"Dispatched", otp:o.otp}, "Marked dispatched", "Marked dispatched here, but couldn't update the sheet — try again");
+          if(ok) toast(`OTP ${o.otp} emailed to ${o.email}`);
+        })();
       }
       if(act==="deliver"){
         tr.lastElementChild.innerHTML=`<div class="dispatch-box"><input placeholder="Enter OTP from customer" data-role="otpIn" style="font-size:12px;padding:6px"><input type="file" accept="image/*" capture="environment" data-role="photoIn" style="font-size:11px"><button class="small-btn" data-act="confirmDeliver">Confirm delivered</button></div>`;
@@ -576,11 +586,14 @@ function wireOwnerOrderActions(){
         const otpIn=cell.querySelector('[data-role="otpIn"]')?.value.trim();
         if(otpIn!==o.otp){ toast("OTP does not match"); return; }
         const file=cell.querySelector('[data-role="photoIn"]')?.files[0];
-        const finish=photo=>{
-          o.deliveryPhoto=photo||null; o.stage="Delivered"; o.deliveredAt=new Date().toISOString(); save(); toast("Marked delivered"); renderOwner();
+        const finish=async photo=>{
+          o.deliveryPhoto=photo||null; o.stage="Delivered"; o.deliveredAt=new Date().toISOString(); save(); renderOwner();
           // Demo note: Code.gs's delivery_photo_link just stores whatever string is sent (meant for a
-          // pasted Drive link) — here we pass the captured photo as a data URL instead.
-          apiPostSafe("updateOrderStatus", {order_id:o.id, status:"Delivered", delivery_photo_link:photo||""});
+          // pasted Drive link) — here we pass the captured photo as a data URL instead. The photo is
+          // sent separately via apiPostBig (same reasoning as banners/payment screenshots) — a phone
+          // camera photo is too big for the GET request updateOrderStatus itself uses.
+          await apiPostConfirmed("updateOrderStatus", {order_id:o.id, status:"Delivered"}, "Marked delivered", "Marked delivered here, but couldn't update the sheet — try again");
+          if(photo) apiPostBig("attachPhoto", {sheet:"Orders", id_field:"order_id", id:o.id, field:"delivery_photo_link", value:photo});
         };
         if(file){ const r=new FileReader(); r.onload=()=>finish(r.result); r.readAsDataURL(file); } else finish(null);
       }
@@ -618,7 +631,7 @@ function runMatch(quiet){
   $("#mres").querySelectorAll("[data-shotzoom]").forEach(img=>{
     img.onclick=()=>{ const big=img.style.maxWidth!=="100%"; img.style.maxWidth=big?"100%":"140px"; img.style.cursor=big?"zoom-out":"zoom-in"; };
   });
-  $("#mres").onclick=e=>{const b=e.target.closest("[data-ver]");if(!b)return;const o=S.orders.find(x=>x.id===b.dataset.ver);o.status="Verified";o.manual=true;save();runMatch(true);toast(`${o.id} marked verified`);apiPostSafe("verifyPayment",{utr:o.utr||"",matched_order_id:o.id,status:"Matched"})};
+  $("#mres").onclick=async e=>{const b=e.target.closest("[data-ver]");if(!b)return;const o=S.orders.find(x=>x.id===b.dataset.ver);o.status="Verified";o.manual=true;save();runMatch(true);await apiPostConfirmed("verifyPayment",{utr:o.utr||"",matched_order_id:o.id,status:"Matched"},`${o.id} marked verified`,`${o.id} marked verified here, but couldn't save to the sheet — try again`)};
 }
 
 /* ================= Delivery Rules tab: cutoff, villages CRUD, same-day zone (center + radius) ================= */
@@ -660,8 +673,12 @@ function renderRulesTab(body){
     </div>
 
     <p class="sec-label" style="margin-top:28px">Home screen banners (up to 3)</p>
-    <div class="zone-note">Images look best at <b>1200 × 500px</b> (landscape, 12:5 ratio) — upload at that size for no cropping. A different size still works, we'll auto-fit it to this shape. Leave a slot empty to not show a banner there.</div>
-    <div class="oc-row" id="bannerSlots" style="align-items:flex-start;gap:16px"></div>`;
+    <div class="zone-note">Images look best at <b>1200 × 500px</b> (landscape, 12:5 ratio) — upload at that size for no cropping. A different size still works, we'll auto-fit it to this shape. Leave a slot empty to not show a banner there. Pick your photos, then click <b>Save banners</b> once — they don't go live until you do.</div>
+    <div class="oc-row" id="bannerSlots" style="align-items:flex-start;gap:16px"></div>
+    <div class="oc-row" style="margin-top:10px">
+      <button class="cta" id="saveBannersBtn" style="padding:8px 16px;font-size:13px">Save banners</button>
+    </div>`;
+  const pendingBanners = new Set(); // slot numbers changed since the last Save click
   function renderBannerSlots(){
     const wrap=$("#bannerSlots"); if(!wrap) return;
     wrap.innerHTML=[1,2,3].map(n=>{
@@ -672,27 +689,54 @@ function renderRulesTab(body){
         </div>
         <input type="file" accept="image/*" data-banner="${n}" style="margin-top:6px;font-size:12px;width:100%">
         ${cur?`<button class="small-btn danger" data-rmbanner="${n}" style="margin-top:4px;width:100%">Remove</button>`:""}
+        ${pendingBanners.has(n)?`<div style="font-size:11px;color:var(--marigold);margin-top:2px">Not saved yet</div>`:""}
       </div>`;
     }).join("");
     wrap.querySelectorAll("[data-banner]").forEach(inp=>{
+      // Only stages the photo locally (preview + pending flag) — nothing is sent to the sheet
+      // until "Save banners" is clicked. This also lets Save give one honest confirmation instead
+      // of a toast that fires before we actually know the upload landed.
       inp.onchange=async e=>{
-        const n=inp.dataset.banner, f=e.target.files[0]; if(!f) return;
+        const n=Number(inp.dataset.banner), f=e.target.files[0]; if(!f) return;
         const dataUrl = await resizeImageFile_(f, 1200, 0.7);
-        S.config["banner_"+n]=dataUrl; save(); renderBannerSlots();
-        apiPostBig("updateConfig", {["banner_"+n]:dataUrl});
-        toast("Banner "+n+" saved"+(apiConfigured()?"":" (local demo — connect the backend to go live)"));
+        S.config["banner_"+n]=dataUrl; save();
+        pendingBanners.add(n);
+        renderBannerSlots();
       };
     });
     wrap.querySelectorAll("[data-rmbanner]").forEach(btn=>{
-      btn.onclick=async ()=>{
-        const n=btn.dataset.rmbanner;
-        S.config["banner_"+n]=""; save(); renderBannerSlots();
-        await apiPostSafe("updateConfig", {["banner_"+n]:""});
-        toast("Banner "+n+" removed");
+      btn.onclick=()=>{
+        const n=Number(btn.dataset.rmbanner);
+        S.config["banner_"+n]=""; save();
+        pendingBanners.add(n);
+        renderBannerSlots();
       };
     });
   }
   renderBannerSlots();
+  $("#saveBannersBtn").onclick=async ()=>{
+    if(!pendingBanners.size){ toast("No banner changes to save"); return; }
+    if(!apiConfigured()){ toast("Saved locally (local demo — connect the backend to go live)"); pendingBanners.clear(); renderBannerSlots(); return; }
+    const btn=$("#saveBannersBtn"); const slots=[...pendingBanners];
+    btn.disabled=true; btn.textContent="Saving…";
+    slots.forEach(n=>apiPostBig("updateConfig", {["banner_"+n]:S.config["banner_"+n]||""}));
+    // apiPostBig can't read its own response (see its comment), so the only honest way to confirm
+    // the sheet actually got the photo is to wait for it to finish writing, then re-fetch config
+    // with a normal (small, readable) GET and compare.
+    await new Promise(r=>setTimeout(r, 3000));
+    try{
+      const fresh = await apiGetAll();
+      const ok = slots.filter(n=>(fresh.config["banner_"+n]||"")===(S.config["banner_"+n]||""));
+      const failed = slots.filter(n=>!ok.includes(n));
+      if(ok.length){ ok.forEach(n=>pendingBanners.delete(n)); toast("Banner"+(ok.length>1?"s ":" ")+ok.join(", ")+" saved"); }
+      if(failed.length) toast("Banner"+(failed.length>1?"s ":" ")+failed.join(", ")+" didn't save — try again (maybe a smaller photo)");
+    }catch(err){
+      console.warn("Geeta Dresses owner: couldn't verify banner save.", err);
+      toast("Sent, but couldn't confirm it saved — reopen this page in a bit to check");
+    }
+    btn.disabled=false; btn.textContent="Save banners";
+    renderBannerSlots();
+  };
   function syncVillages(){ save(); apiPostSafe("updateVillages", {villages:S.config.villages}); }
   $("#villRows").addEventListener("change", e=>{
     const tr=e.target.closest("tr"); if(!tr) return;
@@ -710,9 +754,10 @@ function renderRulesTab(body){
     S.config.villages.push({id:"v"+Date.now(), name:"New village", nameHi:"", lat:SHOP_LOC.lat, lng:SHOP_LOC.lng, tier:"next"});
     syncVillages(); renderOwner();
   };
-  $("#cutoffIn").onchange=()=>{
+  $("#cutoffIn").onchange=async ()=>{
     S.config.cutoffHour=Math.max(0,Math.min(23,parseInt($("#cutoffIn").value)||DEFAULT_CUTOFF_HOUR));
-    save(); apiPostSafe("updateConfig", {cutoff_hour:S.config.cutoffHour});
+    save();
+    await apiPostConfirmed("updateConfig", {cutoff_hour:S.config.cutoffHour}, "Cutoff time saved", "Cutoff time couldn't be saved to the sheet — try again");
   };
   const onZoneInput=()=>{
     S.config.zone.lat=parseFloat($("#zoneLat").value)||SHOP_LOC.lat;
@@ -728,11 +773,12 @@ function renderRulesTab(body){
   };
   $("#saveRules").onclick=async ()=>{
     save();
-    await Promise.all([
+    if(!apiConfigured()){ toast("Saved — the customer app sees this immediately (same browser, local demo)."); return; }
+    const [cfgRes, villRes] = await Promise.all([
       apiPostSafe("updateConfig", {cutoff_hour:S.config.cutoffHour, zone_center_lat:S.config.zone.lat, zone_center_lng:S.config.zone.lng, zone_radius_km:S.config.zone.radiusKm}),
       apiPostSafe("updateVillages", {villages:S.config.villages})
     ]);
-    toast(apiConfigured() ? "Saved to the sheet — the customer app will see this on its next load." : "Saved — the customer app sees this immediately (same browser, local demo).");
+    toast((cfgRes && villRes) ? "Saved to the sheet — the customer app will see this on its next load." : "Saved here, but the sheet didn't confirm it — try again");
   };
   renderZoneVillageList();
 }
