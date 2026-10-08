@@ -194,7 +194,6 @@ function applyRemoteConfig(config){
 const STORE_KEY = "gd_demo_v3";
 const DEFAULT_CUTOFF_HOUR = 16;
 const SHOP_LOC = {lat:22.760, lng:78.357};
-const DEFAULT_ZONE_RADIUS_KM = 4.5; // same-day delivery radius around the zone center; owner-editable via S.config.zone.radiusKm
 
 /* Owner-editable policy text (Policies tab). Pre-filled with the same copy currently hardcoded in
    catalogue.html's T.en/T.hi so the form isn't empty before the Apps Script backend is deployed. */
@@ -252,13 +251,14 @@ const STOCK_SEED = {
   M401:{M:4,L:0,XL:5,XXL:2}, M402:{S:3,M:0,L:4,XL:2}, M403:{M:5,L:3,XL:0,XXL:4}, M404:{"30":3,"32":0,"34":5,"36":2},
   C501:{"2-3Y":3,"4-5Y":0,"6-7Y":4}, C502:{"2-3Y":2,"4-5Y":3,"6-7Y":0,"8-9Y":5}
 };
+/* Each village now has its OWN center (lat/lng) + its OWN radiusKm — there's no shared zone any
+   more (must match catalogue.html's shape exactly, same reasoning as its comment there). */
 const DEFAULT_VILLAGES = [
-  {id:"pipariya-town", name:"Pipariya Town", nameHi:"पिपरिया टाउन", lat:22.760, lng:78.357, tier:"same"},
-  {id:"sarra", name:"Sarra", nameHi:"सर्रा", lat:22.735, lng:78.330, tier:"same"},
-  {id:"matkuli", name:"Matkuli", nameHi:"मटकुली", lat:22.700, lng:78.420, tier:"next"},
-  {id:"sohagpur", name:"Sohagpur", nameHi:"सोहागपुर", lat:22.695, lng:78.185, tier:"next"},
-  {id:"bankhedi", name:"Bankhedi", nameHi:"बानखेड़ी", lat:22.600, lng:78.130, tier:"next2"},
-  {id:"other", name:"My village isn't listed", nameHi:"मेरा गांव सूची में नहीं है", lat:null, lng:null, tier:"other"},
+  {id:"pipariya-town", name:"Pipariya Town", nameHi:"पिपरिया टाउन", pincode:"461775", lat:22.760, lng:78.357, radiusKm:4.5, tier:"same"},
+  {id:"sarra", name:"Sarra", nameHi:"सर्रा", pincode:"461775", lat:22.735, lng:78.330, radiusKm:4, tier:"same"},
+  {id:"matkuli", name:"Matkuli", nameHi:"मटकुली", pincode:"461881", lat:22.700, lng:78.420, radiusKm:5, tier:"next"},
+  {id:"sohagpur", name:"Sohagpur", nameHi:"सोहागपुर", pincode:"461775", lat:22.695, lng:78.185, radiusKm:5, tier:"next"},
+  {id:"bankhedi", name:"Bankhedi", nameHi:"बानखेड़ी", pincode:"461990", lat:22.600, lng:78.130, radiusKm:6, tier:"next2"},
 ];
 function haversineKm(a,b){ const R=6371,dLat=(b.lat-a.lat)*Math.PI/180,dLng=(b.lng-a.lng)*Math.PI/180;
   const s=Math.sin(dLat/2)**2+Math.cos(a.lat*Math.PI/180)*Math.cos(b.lat*Math.PI/180)*Math.sin(dLng/2)**2;
@@ -271,7 +271,7 @@ function save(){ try{ localStorage.setItem(STORE_KEY, JSON.stringify(S)); }catch
 function mapApiProduct(p){
   return {
     id:p.id, name:p.name, nameHi:p.nameHi, cat:p.category, sub:p.subcategory, mrp:p.mrp, price:p.price, gstRate:p.gstRate,
-    sizes:(p.sizes&&p.sizes.length)?p.sizes:["Free"], badge:p.badge||undefined,
+    sizes:(p.sizes&&p.sizes.length)?p.sizes:["Free"], badge:p.badge||undefined, description:p.description||"",
     photos:p.photos||[], specs:p.specs||{}, faq:p.faq||[]
   };
 }
@@ -305,9 +305,6 @@ async function loadFromApi(){
     if(data.config){
       applyRemoteConfig(data.config);
       if(data.config.cutoff_hour!=null) S.config.cutoffHour = Number(data.config.cutoff_hour)||S.config.cutoffHour;
-      if(data.config.zone_center_lat!=null && data.config.zone_center_lng!=null){
-        S.config.zone = { lat:Number(data.config.zone_center_lat), lng:Number(data.config.zone_center_lng), radiusKm:Number(data.config.zone_radius_km)||DEFAULT_ZONE_RADIUS_KM };
-      }
       [1,2,3].forEach(n=>{ if(data.config["banner_"+n]!=null) S.config["banner_"+n]=data.config["banner_"+n]; });
     }
     if(data.policies) S.policies = Object.assign({}, POLICY_DEFAULTS, data.policies);
@@ -319,7 +316,7 @@ async function loadFromApi(){
 }
 function seed(){
   if(!S.stock || !Object.keys(S.stock).length) S.stock = JSON.parse(JSON.stringify(STOCK_SEED));
-  if(!S.config){ S.config = { cutoffHour: DEFAULT_CUTOFF_HOUR, villages: JSON.parse(JSON.stringify(DEFAULT_VILLAGES)), zone:{ lat:SHOP_LOC.lat, lng:SHOP_LOC.lng, radiusKm:DEFAULT_ZONE_RADIUS_KM } }; }
+  if(!S.config){ S.config = { cutoffHour: DEFAULT_CUTOFF_HOUR, villages: JSON.parse(JSON.stringify(DEFAULT_VILLAGES)) }; }
   if(!S.policies || !Object.keys(S.policies).length) S.policies = Object.assign({}, POLICY_DEFAULTS);
   if(S.orders.length){ save(); return; }
   const d=(n,h)=>{const x=new Date();x.setDate(x.getDate()-n);if(h)x.setHours(x.getHours()-h);return x.toISOString()};
@@ -510,8 +507,16 @@ function renderProductForm(){
       <label>Badge<select id="pf-badge"><option value="">None</option><option value="best" ${p?.badge==="best"?"selected":""}>Bestseller</option><option value="new" ${p?.badge==="new"?"selected":""}>New</option></select></label>
     </div>
     <label>Sizes (comma-separated)<input id="pf-sizes" value="${esc((p?.sizes||[]).join(","))}" placeholder="S,M,L,XL" required></label>
-    <p class="sec-label" style="margin:10px 0 2px">Photos (paste a Google Drive share link per photo)</p>
-    ${[0,1,2,3,4].map(i=>`<label>Photo ${i+1}<input id="pf-photo${i}" value="${esc(photos[i]||"")}" placeholder="https://drive.google.com/..."></label>`).join("")}
+    <label>Description<textarea id="pf-desc" rows="3" placeholder="Fabric, fit, occasion, care — whatever the customer should know">${esc(p?.description||"")}</textarea></label>
+    <p class="sec-label" style="margin:10px 0 2px">Photos (up to 5) — pick a file, no need to upload to Drive yourself</p>
+    <div class="oc-row" style="align-items:flex-start;flex-wrap:wrap;gap:12px" id="pfPhotoSlots">
+      ${[0,1,2,3,4].map(i=>`<div style="width:100px">
+        <div id="pfPhotoPreview${i}" style="aspect-ratio:1;background:var(--chip);border-radius:8px;overflow:hidden;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:11px;text-align:center">
+          ${photos[i]?`<img src="${photos[i]}" style="width:100%;height:100%;object-fit:cover">`:"No photo"}
+        </div>
+        <input type="file" accept="image/*" data-photo="${i}" style="margin-top:4px;font-size:11px;width:100%">
+      </div>`).join("")}
+    </div>
     <label>Specs (one per line, "Key: value")<textarea id="pf-specs" rows="3">${esc(specsText)}</textarea></label>
     <label>FAQ (one per line, "Question | Answer")<textarea id="pf-faq" rows="2">${esc(faqLines)}</textarea></label>
     <div class="err" id="pfErr" style="color:var(--madder);font-size:13px;min-height:1em"></div>
@@ -521,6 +526,25 @@ function renderProductForm(){
     </div>
   </form>`;
   $("#pfCancel").onclick=()=>{ invFormState=null; wrap.innerHTML=""; };
+  // Staged photo picks (slot index -> resized dataURL), kept only until Save is clicked — then
+  // each one is uploaded to Drive separately (see apiPostBig below) rather than stuffed into the
+  // main product save, which travels as a small GET request and can't carry a base64 image.
+  const pendingPhotos = {};
+  wrap.querySelectorAll("[data-photo]").forEach(inp=>{
+    inp.onchange=async e=>{
+      const i=Number(inp.dataset.photo), f=e.target.files[0]; if(!f) return;
+      try{
+        const dataUrl = await resizeImageFile_(f, 1600, 0.75);
+        pendingPhotos[i]=dataUrl;
+        const prev=$("#pfPhotoPreview"+i);
+        if(prev) prev.innerHTML=`<img src="${dataUrl}" style="width:100%;height:100%;object-fit:cover">`;
+      }catch(err){
+        console.warn("Geeta Dresses owner: couldn't read product photo.", err);
+        toast("Couldn't read that photo — re-export it as a plain JPG or PNG and try again");
+        inp.value="";
+      }
+    };
+  });
   $("#productForm").onsubmit=async e=>{
     e.preventDefault();
     const sizes = $("#pf-sizes").value.split(",").map(s=>s.trim()).filter(Boolean);
@@ -534,16 +558,22 @@ function renderProductForm(){
     });
     const cat = $("#pf-cat").value;
     const id = editing ? invFormState : nextProductId(cat);
+    const description = $("#pf-desc").value.trim();
+    // Keep the EXISTING photo links in the main save — a picked file's data URL is far too big
+    // for this GET request (same reasoning as banners) and goes separately below instead.
     const productObj = {
       id, category:cat, subcategory:$("#pf-sub").value.trim(),
       name:$("#pf-name").value.trim(), nameHi:$("#pf-nameHi").value.trim(),
       mrp:Number($("#pf-mrp").value)||0, price:Number($("#pf-price").value)||0, gstRate:Number($("#pf-gst").value)||0,
-      sizes, badge:$("#pf-badge").value||undefined,
-      photos:[0,1,2,3,4].map(i=>$("#pf-photo"+i).value.trim()).filter(Boolean),
+      sizes, badge:$("#pf-badge").value||undefined, description,
+      photos:photos.filter(Boolean),
       specs, faq
     };
-    // Optimistic local update so the Inventory list re-renders immediately.
-    const localProduct = { id, name:productObj.name, nameHi:productObj.nameHi, cat, sub:productObj.subcategory, mrp:productObj.mrp, price:productObj.price, gstRate:productObj.gstRate, sizes, badge:productObj.badge, photos:productObj.photos, specs, faq };
+    // Optimistic local preview: slots with a freshly picked photo show that photo right away
+    // (as the local resized copy), even though the real Drive link only lands after the upload
+    // below finishes and the page is reloaded.
+    const previewPhotos = [0,1,2,3,4].map(i=>pendingPhotos[i]!==undefined?pendingPhotos[i]:(photos[i]||"")).filter(Boolean);
+    const localProduct = { id, name:productObj.name, nameHi:productObj.nameHi, cat, sub:productObj.subcategory, mrp:productObj.mrp, price:productObj.price, gstRate:productObj.gstRate, sizes, badge:productObj.badge, description, photos:previewPhotos, specs, faq };
     const idx = PRODUCTS.findIndex(x=>x.id===id);
     if(idx>-1) PRODUCTS[idx]=localProduct; else PRODUCTS.push(localProduct);
     if(!S.stock[id]) S.stock[id] = {}; sizes.forEach(s=>{ if(S.stock[id][s]==null) S.stock[id][s]=0; });
@@ -551,6 +581,11 @@ function renderProductForm(){
     invFormState=null;
     renderOwner();
     await apiPostConfirmed("updateProduct", {product:productObj}, editing?`${id} updated`:`${id} added`, `${id} saved here, but couldn't reach the sheet — try again`);
+    const pendingSlots=Object.keys(pendingPhotos);
+    if(pendingSlots.length){
+      pendingSlots.forEach(i=>apiPostBig("uploadProductPhoto", {product_id:id, slot:Number(i)+1, data_url:pendingPhotos[i]}));
+      toast(`Uploading ${pendingSlots.length>1?"photos":"photo"} to Drive — reopen ${id} in about 10 seconds to confirm`);
+    }
   };
 }
 
@@ -634,20 +669,22 @@ function runMatch(quiet){
   $("#mres").onclick=async e=>{const b=e.target.closest("[data-ver]");if(!b)return;const o=S.orders.find(x=>x.id===b.dataset.ver);o.status="Verified";o.manual=true;save();runMatch(true);await apiPostConfirmed("verifyPayment",{utr:o.utr||"",matched_order_id:o.id,status:"Matched"},`${o.id} marked verified`,`${o.id} marked verified here, but couldn't save to the sheet — try again`)};
 }
 
-/* ================= Delivery Rules tab: cutoff, villages CRUD, same-day zone (center + radius) ================= */
+/* ================= Delivery Rules tab: cutoff, villages CRUD (each village has its OWN pincode + center + radius — no shared zone any more) ================= */
 function renderRulesTab(body){
-  if(!S.config.zone) S.config.zone = { lat:SHOP_LOC.lat, lng:SHOP_LOC.lng, radiusKm:DEFAULT_ZONE_RADIUS_KM };
   body.innerHTML=`
     <label style="max-width:220px">Same-day order cutoff (24h hour)
       <input type="number" min="0" max="23" id="cutoffIn" value="${S.config.cutoffHour}">
     </label>
     <p class="sec-label" style="margin-top:18px">Villages</p>
-    <div class="tbl-wrap"><table><thead><tr><th>Name (EN)</th><th>Name (HI)</th><th>Lat</th><th>Lng</th><th>Tier</th><th></th></tr></thead><tbody id="villRows">
+    <div class="zone-note">Each village has its own delivery center (lat/lng) and radius. A customer within that radius of that village's center can order; outside it, they can't. The pincode is what customers search by on the app to find their village — a village can share a pincode with others nearby.</div>
+    <div class="tbl-wrap"><table><thead><tr><th>Name (EN)</th><th>Name (HI)</th><th>Pincode</th><th>Lat</th><th>Lng</th><th>Radius (km)</th><th>Tier</th><th></th></tr></thead><tbody id="villRows">
     ${S.config.villages.map((v,i)=>`<tr data-i="${i}" class="vill-form">
       <td><input data-f="name" value="${esc(v.name)}" style="width:120px"></td>
       <td><input data-f="nameHi" value="${esc(v.nameHi||"")}" style="width:100px"></td>
+      <td><input data-f="pincode" value="${esc(v.pincode||"")}" inputmode="numeric" maxlength="6" style="width:80px"></td>
       <td><input data-f="lat" type="number" step="0.001" value="${v.lat??""}" style="width:90px"></td>
       <td><input data-f="lng" type="number" step="0.001" value="${v.lng??""}" style="width:90px"></td>
+      <td><input data-f="radiusKm" type="number" step="0.1" min="0" value="${v.radiusKm??""}" style="width:80px"></td>
       <td><select data-f="tier">
         <option value="same" ${v.tier==="same"?"selected":""}>same-day</option>
         <option value="next" ${v.tier==="next"?"selected":""}>next-day</option>
@@ -658,16 +695,6 @@ function renderRulesTab(body){
     </tr>`).join("")}
     </tbody></table></div>
     <button class="small-btn" id="addVillage" style="margin-top:8px">+ Add village</button>
-
-    <p class="sec-label" style="margin-top:20px">Same-day delivery zone (center + radius)</p>
-    <div class="zone-note">A customer is treated as same-day eligible whenever their fetched location is within <b>radius</b> km of the <b>center</b> point below — straight-line distance, not a drawn shape. Adjust the fields and the village distances below update live so you can see who falls inside vs outside.</div>
-    <div class="oc-row" style="align-items:flex-end">
-      <label style="max-width:160px">Center latitude<input type="number" step="0.0001" id="zoneLat" value="${S.config.zone.lat}"></label>
-      <label style="max-width:160px">Center longitude<input type="number" step="0.0001" id="zoneLng" value="${S.config.zone.lng}"></label>
-      <label style="max-width:140px">Radius (km)<input type="number" step="0.1" min="0" id="zoneRadius" value="${S.config.zone.radiusKm}"></label>
-      <button class="small-btn" id="useShopLoc" type="button">Use shop location</button>
-    </div>
-    <div id="zoneVillageList" style="margin-top:10px"></div>
     <div class="oc-row" style="margin-top:10px">
       <button class="cta" id="saveRules" style="padding:8px 16px;font-size:13px">Save delivery rules</button>
     </div>
@@ -698,10 +725,19 @@ function renderRulesTab(body){
       // of a toast that fires before we actually know the upload landed.
       inp.onchange=async e=>{
         const n=Number(inp.dataset.banner), f=e.target.files[0]; if(!f) return;
-        const dataUrl = await resizeImageFile_(f, 1200, 0.7);
-        S.config["banner_"+n]=dataUrl; save();
-        pendingBanners.add(n);
-        renderBannerSlots();
+        try{
+          const dataUrl = await resizeImageFile_(f, 1200, 0.7);
+          S.config["banner_"+n]=dataUrl; save();
+          pendingBanners.add(n);
+          renderBannerSlots();
+        }catch(err){
+          // Previously failed completely silently (an unhandled rejection) if the browser
+          // couldn't decode the file — e.g. some PNG/JPEG exports from Canva/Photoshop use a
+          // color profile or format variant <img> won't load. Now at least tells you.
+          console.warn("Geeta Dresses owner: couldn't read banner photo.", err);
+          toast("Couldn't read that photo — re-export it as a plain JPG or PNG and try again");
+          inp.value="";
+        }
       };
     });
     wrap.querySelectorAll("[data-rmbanner]").forEach(btn=>{
@@ -741,17 +777,16 @@ function renderRulesTab(body){
   $("#villRows").addEventListener("change", e=>{
     const tr=e.target.closest("tr"); if(!tr) return;
     const v=S.config.villages[+tr.dataset.i]; const f=e.target.dataset.f; if(!f) return;
-    if(f==="lat"||f==="lng") v[f]=e.target.value===""?null:parseFloat(e.target.value);
+    if(f==="lat"||f==="lng"||f==="radiusKm") v[f]=e.target.value===""?null:parseFloat(e.target.value);
     else v[f]=e.target.value;
     syncVillages();
-    if(f==="lat"||f==="lng") renderZoneVillageList();
   });
   $("#villRows").addEventListener("click", e=>{
     const b=e.target.closest("[data-del]"); if(!b) return;
     S.config.villages.splice(+b.dataset.del,1); syncVillages(); renderOwner();
   });
   $("#addVillage").onclick=()=>{
-    S.config.villages.push({id:"v"+Date.now(), name:"New village", nameHi:"", lat:SHOP_LOC.lat, lng:SHOP_LOC.lng, tier:"next"});
+    S.config.villages.push({id:"v"+Date.now(), name:"New village", nameHi:"", pincode:"", lat:SHOP_LOC.lat, lng:SHOP_LOC.lng, radiusKm:3, tier:"next"});
     syncVillages(); renderOwner();
   };
   $("#cutoffIn").onchange=async ()=>{
@@ -759,39 +794,15 @@ function renderRulesTab(body){
     save();
     await apiPostConfirmed("updateConfig", {cutoff_hour:S.config.cutoffHour}, "Cutoff time saved", "Cutoff time couldn't be saved to the sheet — try again");
   };
-  const onZoneInput=()=>{
-    S.config.zone.lat=parseFloat($("#zoneLat").value)||SHOP_LOC.lat;
-    S.config.zone.lng=parseFloat($("#zoneLng").value)||SHOP_LOC.lng;
-    S.config.zone.radiusKm=Math.max(0,parseFloat($("#zoneRadius").value)||0);
-    save(); renderZoneVillageList();
-  };
-  $("#zoneLat").oninput=onZoneInput; $("#zoneLng").oninput=onZoneInput; $("#zoneRadius").oninput=onZoneInput;
-  $("#useShopLoc").onclick=()=>{
-    const lat=(typeof SHOP_LOC!=="undefined"&&SHOP_LOC.lat)??S.config.shop_lat??SHOP_LOC.lat;
-    const lng=(typeof SHOP_LOC!=="undefined"&&SHOP_LOC.lng)??S.config.shop_lng??SHOP_LOC.lng;
-    $("#zoneLat").value=lat; $("#zoneLng").value=lng; onZoneInput();
-  };
   $("#saveRules").onclick=async ()=>{
     save();
     if(!apiConfigured()){ toast("Saved — the customer app sees this immediately (same browser, local demo)."); return; }
     const [cfgRes, villRes] = await Promise.all([
-      apiPostSafe("updateConfig", {cutoff_hour:S.config.cutoffHour, zone_center_lat:S.config.zone.lat, zone_center_lng:S.config.zone.lng, zone_radius_km:S.config.zone.radiusKm}),
+      apiPostSafe("updateConfig", {cutoff_hour:S.config.cutoffHour}),
       apiPostSafe("updateVillages", {villages:S.config.villages})
     ]);
     toast((cfgRes && villRes) ? "Saved to the sheet — the customer app will see this on its next load." : "Saved here, but the sheet didn't confirm it — try again");
   };
-  renderZoneVillageList();
-}
-function renderZoneVillageList(){
-  const wrap=$("#zoneVillageList"); if(!wrap) return;
-  const zone=S.config.zone;
-  const rows=S.config.villages.filter(v=>v.lat!=null).map(v=>{
-    const d=haversineKm({lat:zone.lat,lng:zone.lng},v);
-    const inside=d<=(zone.radiusKm||0);
-    return `<tr><td>${esc(v.name)}</td><td>${d.toFixed(2)} km</td><td><span class="pill ${inside?"p-ok":"p-wait"}">${inside?"inside — same-day":"outside"}</span></td><td style="color:var(--muted)">(tier: ${esc(v.tier)})</td></tr>`;
-  }).join("");
-  wrap.innerHTML=`<p class="sec-label" style="margin:0 0 6px">Villages vs. this zone</p>
-  <div class="tbl-wrap"><table><thead><tr><th>Village</th><th>Distance from center</th><th>Zone status</th><th></th></tr></thead><tbody>${rows||`<tr><td colspan="4" style="color:var(--muted)">No villages with coordinates yet.</td></tr>`}</tbody></table></div>`;
 }
 
 /* ================= Boot ================= */
