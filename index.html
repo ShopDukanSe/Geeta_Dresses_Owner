@@ -507,6 +507,8 @@ function renderProductForm(){
       <label>Badge<select id="pf-badge"><option value="">None</option><option value="best" ${p?.badge==="best"?"selected":""}>Bestseller</option><option value="new" ${p?.badge==="new"?"selected":""}>New</option></select></label>
     </div>
     <label>Sizes (comma-separated)<input id="pf-sizes" value="${esc((p?.sizes||[]).join(","))}" placeholder="S,M,L,XL" required></label>
+    <p class="sec-label" style="margin:10px 0 2px">Stock per size</p>
+    <div class="oc-row" id="pfStockWrap" style="flex-wrap:wrap;gap:10px"></div>
     <label>Description<textarea id="pf-desc" rows="3" placeholder="Fabric, fit, occasion, care — whatever the customer should know">${esc(p?.description||"")}</textarea></label>
     <p class="sec-label" style="margin:10px 0 2px">Photos (up to 5) — pick a file, no need to upload to Drive yourself</p>
     <div class="oc-row" style="align-items:flex-start;flex-wrap:wrap;gap:12px" id="pfPhotoSlots">
@@ -526,6 +528,17 @@ function renderProductForm(){
     </div>
   </form>`;
   $("#pfCancel").onclick=()=>{ invFormState=null; wrap.innerHTML=""; };
+  // Stock-per-size inputs — regenerated whenever the Sizes field changes, so adding a brand new
+  // product also sets its starting stock right here instead of a separate trip to the Inventory
+  // table afterwards. Prefilled from S.stock when editing an existing product.
+  const existingStock = (p && S.stock[p.id]) || {};
+  function renderStockInputs(){
+    const sizes = $("#pf-sizes").value.split(",").map(s=>s.trim()).filter(Boolean);
+    $("#pfStockWrap").innerHTML = sizes.length ? sizes.map(s=>`<label class="inv-size">${esc(s)}<input type="number" min="0" data-stocksize="${esc(s)}" value="${existingStock[s]??0}"></label>`).join("")
+      : `<span style="color:var(--muted);font-size:13px">Enter sizes above first.</span>`;
+  }
+  renderStockInputs();
+  $("#pf-sizes").oninput=renderStockInputs;
   // Staged photo picks (slot index -> resized dataURL), kept only until Save is clicked — then
   // each one is uploaded to Drive separately (see apiPostBig below) rather than stuffed into the
   // main product save, which travels as a small GET request and can't carry a base64 image.
@@ -576,11 +589,14 @@ function renderProductForm(){
     const localProduct = { id, name:productObj.name, nameHi:productObj.nameHi, cat, sub:productObj.subcategory, mrp:productObj.mrp, price:productObj.price, gstRate:productObj.gstRate, sizes, badge:productObj.badge, description, photos:previewPhotos, specs, faq };
     const idx = PRODUCTS.findIndex(x=>x.id===id);
     if(idx>-1) PRODUCTS[idx]=localProduct; else PRODUCTS.push(localProduct);
-    if(!S.stock[id]) S.stock[id] = {}; sizes.forEach(s=>{ if(S.stock[id][s]==null) S.stock[id][s]=0; });
+    const stockQty = {};
+    wrap.querySelectorAll("[data-stocksize]").forEach(inp=>{ stockQty[inp.dataset.stocksize]=Math.max(0,parseInt(inp.value)||0); });
+    S.stock[id] = Object.assign({}, S.stock[id]||{}, stockQty);
     save();
     invFormState=null;
     renderOwner();
     await apiPostConfirmed("updateProduct", {product:productObj}, editing?`${id} updated`:`${id} added`, `${id} saved here, but couldn't reach the sheet — try again`);
+    await Promise.all(sizes.map(s=>apiPostSafe("updateStock", {product_id:id, size:s, qty:stockQty[s]})));
     const pendingSlots=Object.keys(pendingPhotos);
     if(pendingSlots.length){
       pendingSlots.forEach(i=>apiPostBig("uploadProductPhoto", {product_id:id, slot:Number(i)+1, data_url:pendingPhotos[i]}));
@@ -623,14 +639,23 @@ function wireOwnerOrderActions(){
         const file=cell.querySelector('[data-role="photoIn"]')?.files[0];
         const finish=async photo=>{
           o.deliveryPhoto=photo||null; o.stage="Delivered"; o.deliveredAt=new Date().toISOString(); save(); renderOwner();
-          // Demo note: Code.gs's delivery_photo_link just stores whatever string is sent (meant for a
-          // pasted Drive link) — here we pass the captured photo as a data URL instead. The photo is
-          // sent separately via apiPostBig (same reasoning as banners/payment screenshots) — a phone
-          // camera photo is too big for the GET request updateOrderStatus itself uses.
+          // Photo uploads to Drive (same as banners/product photos) and only the resulting link
+          // gets written to delivery_photo_link. Previously this sent the RAW, un-resized camera
+          // photo straight into a Sheet cell via attachPhoto — routinely several MB, so it blew
+          // past Google Sheets' 50,000-character cell limit on every delivery, silently.
           await apiPostConfirmed("updateOrderStatus", {order_id:o.id, status:"Delivered"}, "Marked delivered", "Marked delivered here, but couldn't update the sheet — try again");
-          if(photo) apiPostBig("attachPhoto", {sheet:"Orders", id_field:"order_id", id:o.id, field:"delivery_photo_link", value:photo});
+          if(photo) apiPostBig("uploadDeliveryPhoto", {order_id:o.id, data_url:photo});
         };
-        if(file){ const r=new FileReader(); r.onload=()=>finish(r.result); r.readAsDataURL(file); } else finish(null);
+        if(file){
+          (async()=>{
+            try{ finish(await resizeImageFile_(file, 1200, 0.7)); }
+            catch(err){
+              console.warn("Geeta Dresses owner: couldn't read delivery photo.", err);
+              toast("Marked delivered, but couldn't read that photo — the delivery itself is still saved");
+              finish(null);
+            }
+          })();
+        } else finish(null);
       }
     };
   });
@@ -755,20 +780,35 @@ function renderRulesTab(body){
     if(!apiConfigured()){ toast("Saved locally (local demo — connect the backend to go live)"); pendingBanners.clear(); renderBannerSlots(); return; }
     const btn=$("#saveBannersBtn"); const slots=[...pendingBanners];
     btn.disabled=true; btn.textContent="Saving…";
-    slots.forEach(n=>apiPostBig("updateConfig", {["banner_"+n]:S.config["banner_"+n]||""}));
+    // Each banner photo now goes to Drive (same as product photos) instead of being stuffed
+    // as raw base64 into a Config sheet cell — that old approach is why banners never saved
+    // even once: a resized banner photo is routinely 80,000+ base64 characters, and a single
+    // Google Sheets cell hard-caps at 50,000 characters, so the save threw an error on the
+    // server every time, invisibly (apiPostBig is a no-cors fire-and-forget POST). An empty
+    // slot (Remove) is tiny, so that alone still goes straight through updateConfig.
+    const wasCleared={};
+    slots.forEach(n=>{
+      const val=S.config["banner_"+n]||"";
+      wasCleared[n]=!val;
+      if(val) apiPostBig("uploadBannerPhoto", {slot:n, data_url:val});
+      else apiPostBig("updateConfig", {["banner_"+n]:""});
+    });
     // apiPostBig can't read its own response (see its comment), so the only honest way to confirm
     // the sheet actually got the photo is to wait for it to finish writing, then re-fetch config
-    // with a normal (small, readable) GET and compare.
-    await new Promise(r=>setTimeout(r, 3000));
+    // with a normal (small, readable) GET and check it actually changed.
+    await new Promise(r=>setTimeout(r, 4000));
     try{
       const fresh = await apiGetAll();
-      const ok = slots.filter(n=>(fresh.config["banner_"+n]||"")===(S.config["banner_"+n]||""));
+      const ok = slots.filter(n=>{
+        const v = fresh.config["banner_"+n]||"";
+        return wasCleared[n] ? !v : v.indexOf("drive.google.com")!==-1;
+      });
       const failed = slots.filter(n=>!ok.includes(n));
-      if(ok.length){ ok.forEach(n=>pendingBanners.delete(n)); toast("Banner"+(ok.length>1?"s ":" ")+ok.join(", ")+" saved"); }
+      if(ok.length){ ok.forEach(n=>{ pendingBanners.delete(n); if(fresh.config["banner_"+n]) S.config["banner_"+n]=fresh.config["banner_"+n]; }); save(); toast("Banner"+(ok.length>1?"s ":" ")+ok.join(", ")+" saved"); }
       if(failed.length) toast("Banner"+(failed.length>1?"s ":" ")+failed.join(", ")+" didn't save — try again (maybe a smaller photo)");
     }catch(err){
       console.warn("Geeta Dresses owner: couldn't verify banner save.", err);
-      toast("Sent, but couldn't confirm it saved — reopen this page in a bit to check");
+      toast("Sent, but couldn't confirm it saved — reopen this page in about 10 seconds to check");
     }
     btn.disabled=false; btn.textContent="Save banners";
     renderBannerSlots();
