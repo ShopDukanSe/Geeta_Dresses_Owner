@@ -305,7 +305,10 @@ async function loadFromApi(){
     if(data.config){
       applyRemoteConfig(data.config);
       if(data.config.cutoff_hour!=null) S.config.cutoffHour = Number(data.config.cutoff_hour)||S.config.cutoffHour;
-      [1,2,3].forEach(n=>{ if(data.config["banner_"+n]!=null) S.config["banner_"+n]=data.config["banner_"+n]; });
+      [1,2,3].forEach(n=>{
+        ["en","hi"].forEach(lg=>{ const k="banner_"+n+"_"+lg; if(data.config[k]!=null) S.config[k]=data.config[k]; });
+        if(data.config["banner_"+n]!=null) S.config["banner_"+n]=data.config["banner_"+n]; // legacy pre-language key, kept for display until re-saved
+      });
     }
     if(data.policies) S.policies = Object.assign({}, POLICY_DEFAULTS, data.policies);
     if(data.orders && data.orders.length){ S.orders = data.orders.map(mapApiOrder); S.baseVotes = S.baseVotes||{}; PRODUCTS.forEach((p,i)=>{ if(!S.baseVotes[p.id]) S.baseVotes[p.id]={like:8+((i*7)%15),dislike:1+((i*3)%5)}; }); }
@@ -733,74 +736,89 @@ function renderRulesTab(body){
       <button class="cta" id="saveRules" style="padding:8px 16px;font-size:13px">Save delivery rules</button>
     </div>
 
-    <p class="sec-label" style="margin-top:28px">Home screen banners (up to 3)</p>
-    <div class="zone-note">Images look best at <b>1200 × 500px</b> (landscape, 12:5 ratio) — upload at that size for no cropping. A different size still works, we'll auto-fit it to this shape. Leave a slot empty to not show a banner there. Pick your photos, then click <b>Save banners</b> once — they don't go live until you do.</div>
-    <div class="oc-row" id="bannerSlots" style="align-items:flex-start;gap:16px"></div>
+    <p class="sec-label" style="margin-top:28px">Home screen banners (up to 3 each — set separately for English and Hindi)</p>
+    <div class="zone-note">Images look best at <b>1200 × 500px</b> (landscape, 12:5 ratio) — upload at that size for no cropping. A different size still works, we'll auto-fit it to this shape. Leave a slot empty to not show a banner there. Customers see whichever language they've picked — if you only fill in one language, that one shows for everybody until you add the other. Pick your photos, then click <b>Save banners</b> once — they don't go live until you do.</div>
+    <p style="font-weight:700;margin:14px 0 4px">English banners</p>
+    <div class="oc-row" id="bannerSlots_en" style="align-items:flex-start;gap:16px"></div>
+    <p style="font-weight:700;margin:18px 0 4px">Hindi banners (हिंदी बैनर)</p>
+    <div class="oc-row" id="bannerSlots_hi" style="align-items:flex-start;gap:16px"></div>
     <div class="oc-row" style="margin-top:10px">
       <button class="cta" id="saveBannersBtn" style="padding:8px 16px;font-size:13px">Save banners</button>
     </div>`;
-  const pendingBanners = new Set(); // slot numbers changed since the last Save click
+  const BANNER_LANGS=["en","hi"];
+  const pendingBanners = new Set(); // "slot_lang" keys changed since the last Save click, e.g. "1_en"
+  function bannerKey(n,lang){ return "banner_"+n+"_"+lang; }
   function renderBannerSlots(){
-    const wrap=$("#bannerSlots"); if(!wrap) return;
-    wrap.innerHTML=[1,2,3].map(n=>{
-      const cur=S.config["banner_"+n]||"";
-      return `<div style="width:150px">
-        <div style="aspect-ratio:12/5;background:var(--chip);border-radius:10px;overflow:hidden;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:12px">
-          ${cur?`<img src="${cur}" style="width:100%;height:100%;object-fit:cover">`:"No image"}
-        </div>
-        <input type="file" accept="image/*" data-banner="${n}" style="margin-top:6px;font-size:12px;width:100%">
-        ${cur?`<button class="small-btn danger" data-rmbanner="${n}" style="margin-top:4px;width:100%">Remove</button>`:""}
-        ${pendingBanners.has(n)?`<div style="font-size:11px;color:var(--marigold);margin-top:2px">Not saved yet</div>`:""}
-      </div>`;
-    }).join("");
-    wrap.querySelectorAll("[data-banner]").forEach(inp=>{
-      // Only stages the photo locally (preview + pending flag) — nothing is sent to the sheet
-      // until "Save banners" is clicked. This also lets Save give one honest confirmation instead
-      // of a toast that fires before we actually know the upload landed.
-      inp.onchange=async e=>{
-        const n=Number(inp.dataset.banner), f=e.target.files[0]; if(!f) return;
-        try{
-          const dataUrl = await resizeImageFile_(f, 1200, 0.7);
-          S.config["banner_"+n]=dataUrl; save();
-          pendingBanners.add(n);
+    BANNER_LANGS.forEach(lang=>{
+      const wrap=$("#bannerSlots_"+lang); if(!wrap) return;
+      wrap.innerHTML=[1,2,3].map(n=>{
+        const key=bannerKey(n,lang);
+        // Falls back to the old pre-language banner_<n> value so whatever was already uploaded
+        // keeps showing here (for English, which was the only one that existed before) until
+        // it's replaced or removed.
+        const cur=S.config[key] || (lang==="en" ? (S.config["banner_"+n]||"") : "");
+        const pk=n+"_"+lang;
+        return `<div style="width:150px">
+          <div style="aspect-ratio:12/5;background:var(--chip);border-radius:10px;overflow:hidden;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:12px">
+            ${cur?`<img src="${cur}" style="width:100%;height:100%;object-fit:cover">`:"No image"}
+          </div>
+          <input type="file" accept="image/*" data-banner="${n}" data-lang="${lang}" style="margin-top:6px;font-size:12px;width:100%">
+          ${cur?`<button class="small-btn danger" data-rmbanner="${n}" data-lang="${lang}" style="margin-top:4px;width:100%">Remove</button>`:""}
+          ${pendingBanners.has(pk)?`<div style="font-size:11px;color:var(--marigold);margin-top:2px">Not saved yet</div>`:""}
+        </div>`;
+      }).join("");
+      wrap.querySelectorAll("[data-banner]").forEach(inp=>{
+        // Only stages the photo locally (preview + pending flag) — nothing is sent to the sheet
+        // until "Save banners" is clicked. This also lets Save give one honest confirmation instead
+        // of a toast that fires before we actually know the upload landed.
+        inp.onchange=async e=>{
+          const n=Number(inp.dataset.banner), lg=inp.dataset.lang, f=e.target.files[0]; if(!f) return;
+          try{
+            const dataUrl = await resizeImageFile_(f, 1200, 0.7);
+            S.config[bannerKey(n,lg)]=dataUrl; save();
+            pendingBanners.add(n+"_"+lg);
+            renderBannerSlots();
+          }catch(err){
+            // Previously failed completely silently (an unhandled rejection) if the browser
+            // couldn't decode the file — e.g. some PNG/JPEG exports from Canva/Photoshop use a
+            // color profile or format variant <img> won't load. Now at least tells you.
+            console.warn("Geeta Dresses owner: couldn't read banner photo.", err);
+            toast("Couldn't read that photo — re-export it as a plain JPG or PNG and try again");
+            inp.value="";
+          }
+        };
+      });
+      wrap.querySelectorAll("[data-rmbanner]").forEach(btn=>{
+        btn.onclick=()=>{
+          const n=Number(btn.dataset.rmbanner), lg=btn.dataset.lang;
+          S.config[bannerKey(n,lg)]=""; save();
+          pendingBanners.add(n+"_"+lg);
           renderBannerSlots();
-        }catch(err){
-          // Previously failed completely silently (an unhandled rejection) if the browser
-          // couldn't decode the file — e.g. some PNG/JPEG exports from Canva/Photoshop use a
-          // color profile or format variant <img> won't load. Now at least tells you.
-          console.warn("Geeta Dresses owner: couldn't read banner photo.", err);
-          toast("Couldn't read that photo — re-export it as a plain JPG or PNG and try again");
-          inp.value="";
-        }
-      };
-    });
-    wrap.querySelectorAll("[data-rmbanner]").forEach(btn=>{
-      btn.onclick=()=>{
-        const n=Number(btn.dataset.rmbanner);
-        S.config["banner_"+n]=""; save();
-        pendingBanners.add(n);
-        renderBannerSlots();
-      };
+        };
+      });
     });
   }
   renderBannerSlots();
   $("#saveBannersBtn").onclick=async ()=>{
     if(!pendingBanners.size){ toast("No banner changes to save"); return; }
     if(!apiConfigured()){ toast("Saved locally (local demo — connect the backend to go live)"); pendingBanners.clear(); renderBannerSlots(); return; }
-    const btn=$("#saveBannersBtn"); const slots=[...pendingBanners];
+    const btn=$("#saveBannersBtn"); const keys=[...pendingBanners]; // "slot_lang" strings
     btn.disabled=true; btn.textContent="Saving…";
     // Each banner photo now goes to Drive (same as product photos) instead of being stuffed
     // as raw base64 into a Config sheet cell — that old approach is why banners never saved
     // even once: a resized banner photo is routinely 80,000+ base64 characters, and a single
     // Google Sheets cell hard-caps at 50,000 characters, so the save threw an error on the
     // server every time, invisibly (apiPostBig is a no-cors fire-and-forget POST). An empty
-    // slot (Remove) is tiny, so that alone still goes straight through updateConfig.
+    // slot (Remove) is tiny, so that alone still goes straight through updateConfig. No sheet
+    // columns to add for any of this — Config is just key/value rows, so banner_1_hi etc. are
+    // simply new rows, written the first time they're saved.
     const wasCleared={};
-    slots.forEach(n=>{
-      const val=S.config["banner_"+n]||"";
-      wasCleared[n]=!val;
-      if(val) apiPostBig("uploadBannerPhoto", {slot:n, data_url:val});
-      else apiPostBig("updateConfig", {["banner_"+n]:""});
+    keys.forEach(pk=>{
+      const [n,lg]=pk.split("_");
+      const val=S.config[bannerKey(n,lg)]||"";
+      wasCleared[pk]=!val;
+      if(val) apiPostBig("uploadBannerPhoto", {slot:Number(n), lang:lg, data_url:val});
+      else apiPostBig("updateConfig", {[bannerKey(n,lg)]:""});
     });
     // apiPostBig can't read its own response (see its comment), so the only honest way to confirm
     // the sheet actually got the photo is to wait for it to finish writing, then re-fetch config
@@ -808,13 +826,15 @@ function renderRulesTab(body){
     await new Promise(r=>setTimeout(r, 4000));
     try{
       const fresh = await apiGetAll();
-      const ok = slots.filter(n=>{
-        const v = fresh.config["banner_"+n]||"";
-        return wasCleared[n] ? !v : v.indexOf("drive.google.com")!==-1;
+      const ok = keys.filter(pk=>{
+        const [n,lg]=pk.split("_");
+        const v = fresh.config[bannerKey(n,lg)]||"";
+        return wasCleared[pk] ? !v : v.indexOf("drive.google.com")!==-1;
       });
-      const failed = slots.filter(n=>!ok.includes(n));
-      if(ok.length){ ok.forEach(n=>{ pendingBanners.delete(n); if(fresh.config["banner_"+n]) S.config["banner_"+n]=fresh.config["banner_"+n]; }); save(); toast("Banner"+(ok.length>1?"s ":" ")+ok.join(", ")+" saved"); }
-      if(failed.length) toast("Banner"+(failed.length>1?"s ":" ")+failed.join(", ")+" didn't save — try again (maybe a smaller photo)");
+      const failed = keys.filter(pk=>!ok.includes(pk));
+      const labelFor=pk=>{ const [n,lg]=pk.split("_"); return n+" "+(lg==="hi"?"Hindi":"English"); };
+      if(ok.length){ ok.forEach(pk=>{ const [n,lg]=pk.split("_"); pendingBanners.delete(pk); const fv=fresh.config[bannerKey(n,lg)]; if(fv) S.config[bannerKey(n,lg)]=fv; }); save(); toast("Banner"+(ok.length>1?"s ":" ")+ok.map(labelFor).join(", ")+" saved"); }
+      if(failed.length) toast("Banner"+(failed.length>1?"s ":" ")+failed.map(labelFor).join(", ")+" didn't save — try again (maybe a smaller photo)");
     }catch(err){
       console.warn("Geeta Dresses owner: couldn't verify banner save.", err);
       toast("Sent, but couldn't confirm it saved — reopen this page in about 10 seconds to check");
